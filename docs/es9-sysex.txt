@@ -1,0 +1,100 @@
+MIDI System Exclusive (SysEx)
+The ES-9 supports a variety of features via MIDI System Exclusive messages. Mostly these are
+intended for use by the config tool.
+SysEx Header
+All SysEx messages are prefixed with a manufacturer's ID, which is a unique series of hex bytes
+assigned by the MIDI Manufacturers Association. The Expert Sleepers ID is 00H 21H 27H, so all
+SysEx messages relating to Expert Sleepers hardware will begin
+F0 00 21 27
+Messages for the ES-9 follow this with 19H:
+F0 00 21 27 19
+and then with a byte to identify the specific type of message e.g.
+F0 00 21 27 19 10
+Received SysEx messages
+09H – Configuration dump
+F0 00 21 27 19 09 <chunk> 0 <configuration data> F7
+Used to send complete configuration dumps from the config tool to the module.
+22H – Request version string
+F0 00 21 27 19 22 F7
+This causes the ES-9 to respond with a SysEx message containing the module's version string as
+text, using the '32H – Message' format, below.
+23H – Request configuration dump
+F0 00 21 27 19 23 F7
+This causes the ES-9 to respond with a SysEx message containing its current state (using message
+10H, below).
+24H – Request save
+F0 00 21 27 19 24 <n> F7
+This causes the ES-9 to save its current state to flash. <n> is 0 for the standalone slot or 1 for the
+hosted slot. Responds with a SysEx message in '32H – Message' format, containing “OK”.
+25H – Request restore
+F0 00 21 27 19 25 <n> F7
+This causes the ES-9 to restore its state from flash. <n> is 0 for the standalone slot or 1 for the
+hosted slot.
+
+26H – Request reset
+F0 00 21 27 19 26 F7
+This causes the ES-9 to reset its current state to defaults. (It does not affect the states stored in
+flash.)
+2AH – Request mix
+F0 00 21 27 19 2A F7
+This causes the ES-9 to respond with a dump of its mix state using a format '11H – Mix' message.
+2BH – Request usage
+F0 00 21 27 19 2B F7
+This causes the ES-9 to report its DSP usage using a format '12H – Usage' message.
+2CH – Request sample rate
+F0 00 21 27 19 2C F7
+This causes the ES-9 to report its current sample rate using a format '14H – Sample rate' message.
+31H – Set HPF
+F0 00 21 27 19 31 <hpf> F7
+Sets the current state of the DC-blocking filters.
+32H – Set Options
+F0 00 21 27 19 32 <options> F7
+Sets the configuration options. Bit 0 – use mixer 2, not S/PDIF. Bit 1 – use MIDI thru.
+33H – Set Links
+F0 00 21 27 19 33 <link> <state> F7
+Enables or disables a mixer link.
+34H – Set Virtual Mix
+F0 00 21 27 19 34 <mix> <level> F7
+Sets a virtual mix fader.
+35H – Set MIDI Channels
+F0 00 21 27 19 35 <USB MIDI channel> <DIN MIDI channel> F7
+Sets the MIDI channels used by the mixers.
+36H – Set DC Offset
+F0 00 21 27 19 36 <channel> <3 bytes of offset> F7
+
+Sets an output DC offset.
+39H – Set Filter
+F0 00 21 27 19 39 <mixer> <filter> <type> <3 bytes of frequency> <3
+bytes of Q> <3 bytes of gain> F7
+Sets the parameters of a mixer filter.
+3AH – Set Smoothing
+F0 00 21 27 19 3A <mix> <state> F7
+Enables or disables smoothing for a mix.
+40H to 43H – Set Inputs
+F0 00 21 27 19 <40 + dsp ID 0-3> <8 bytes of input routing> F7
+Sets the input routing of the four DSP blocks.
+50H to 53H – Set Outputs
+F0 00 21 27 19 <50 + dsp ID 0-3> <8 bytes of output routing> F7
+Sets the output routing of the four DSP blocks.
+60H to 6FH – Set Mix
+F0 00 21 27 19 <60 + mix ID 0-15> <channel 0-7> <3 bytes of value> F7
+Sets a mixer fader.
+Sent SysEx messages
+08H – Configuration dump
+F0 00 21 27 19 08 00 00 <configuration data> F7
+Contains the ES-9's complete configuration. Used to initialise the config tool with the module's
+current state.
+11H – Mix
+F0 00 21 27 19 11 <128 x 3 bytes of mix> <128 x virtual mix/pan> F7
+Contains the ES-9's complete mix state.
+12H – Usage
+F0 00 21 27 19 12 <4 x 2 bytes of usage info> F7
+Contains raw data from which the ES-9's DSP usage can be computed.
+
+14H – Sample rate
+F0 00 21 27 19 14 <3 bytes of sample rate> F7
+Contains the sample rate at which the ES-9 is operating.
+32H – Message
+F0 00 21 27 19 32 <NULL terminated ASCII string> F7
+This message is transmitted in response to any request for a string e.g the version string, and also to
+give feedback on the success or otherwise of an operation e.g. saving the state to flash.

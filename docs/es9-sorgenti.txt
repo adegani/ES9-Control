@@ -1,0 +1,48 @@
+1. Tabella SORGENTI (Sources / Inputs)
+Valori da usare per indicare da dove prelevare l'audio nei comandi di input del DSP o del Mixer:
+
+| ID (Dec) | ID (Hex) | Nome Sorgente / Connessione Hardware | Descrizione |
+| :---: | :---: | :--- | :--- | 
+| 0 | 0x00 | Analogue In 1 | Ingresso fisico jack 3.5mm 1 (Pannello frontale) | 
+| 1 | 0x01 | Analogue In 2 | Ingresso fisico jack 3.5mm 2 (Pannello frontale) | 
+| 2 | 0x02 | Analogue In 3 | Ingresso fisico jack 3.5mm 3 |
+| 3 | 0x03 | Analogue In 4 | Ingresso fisico jack 3.5mm 4 | 
+| 4 | 0x04 | Analogue In 5 | Ingresso fisico jack 3.5mm 5 | 
+| 5 | 0x05 | Analogue In 6 | Ingresso fisico jack 3.5mm 6 | 
+| 6 | 0x06 | Analogue In 7 | Ingresso fisico jack 3.5mm 7 | 
+| 7 | 0x07 | Analogue In 8 | Ingresso fisico jack 3.5mm 8 | 
+| 8 | 0x08 | Analogue In 9 | Ingresso fisico jack 3.5mm 9 | 
+| 9 | 0x09 | Analogue In 10 | Ingresso fisico jack 3.5mm 10 | 
+| 10 | 0x0A | Analogue In 11 | Ingresso fisico jack 3.5mm 11 | 
+| 11 | 0x0B | Analogue In 12 | Ingresso fisico jack 3.5mm 12 | 
+| 12 | 0x0C | Analogue In 13 | Ingresso fisico jack 1/4" / 3.5mm 13 | 
+| 13 | 0x0D | Analogue In 14 | Ingresso fisico jack 1/4" / 3.5mm 14 | 
+| 14 | 0x0E | S/PDIF In L | Ingresso Digitale S/PDIF Sinistro (o Modulo d'espansione) | 
+| 15 | 0x0F | S/PDIF In R | Ingresso Digitale S/PDIF Destro (o Modulo d'espansione) | 
+| 16 – 31 | 0x10 – 0x1F | USB Audio Output 1 – 16 | Canali audio in uscita dalla DAW/Computer via USB (DAW Out 1..16) | 
+| 32 – 47 | 0x20 – 0x2F | Mixer 1 Outputs (0–15) | Uscite/Bus dei fader del Mixer Interno 1 dell'ES-9 | 
+| 48 – 63 | 0x30 – 0x3F | Mixer 2 Outputs (0–15) | Uscite/Bus del Mixer Interno 2 (se abilitato nelle Opzioni) |
+
+2. Tabella DESTINAZIONI (Destinations / Outputs)
+Valori da usare per indicare dove inviare l'audio nei comandi di output:
+
+| ID (Dec) | ID (Hex) | Nome Destinazione / Uscita Hardware | Descrizione | 
+| :---: | :---: | :--- | :--- | 
+| 0 | 0x00 | Main Out L | Uscita fisica bilanciata Jack 1/4" Sinistra | 
+| 1 | 0x01 | Main Out R | Uscita fisica bilanciata Jack 1/4" Destra | 
+| 2 | 0x02 | Phones Out L | Uscita Cuffie (Headphones) Sinistra | 
+| 3 | 0x03 | Phones Out R | Uscita Cuffie (Headphones) Destra | 
+| 4 | 0x04 | Eurorack Out 1 | Uscita fisica Jack 3.5mm 1 (Eurorack Out 1) | 
+| 5 | 0x05 | Eurorack Out 2 | Uscita fisica Jack 3.5mm 2 (Eurorack Out 2) | 
+| 6 | 0x06 | Eurorack Out 3 | Uscita fisica Jack 3.5mm 3 (Eurorack Out 3) | 
+| 7 | 0x07 | Eurorack Out 4 | Uscita fisica Jack 3.5mm 4 (Eurorack Out 4) | 
+| 8 | 0x08 | Eurorack Out 5 | Uscita fisica Jack 3.5mm 5 (Eurorack Out 5) | 
+| 9 | 0x09 | Eurorack Out 6 | Uscita fisica Jack 3.5mm 6 (Eurorack Out 6) | 
+| 10 | 0x0A | Eurorack Out 7 | Uscita fisica Jack 3.5mm 7 (Eurorack Out 7) | 
+| 11 | 0x0B | Eurorack Out 8 | Uscita fisica Jack 3.5mm 8 (Eurorack Out 8) | 
+| 12 | 0x0C | S/PDIF Out L | Uscita Digitale S/PDIF Sinistra | 
+| 13 | 0x0D | S/PDIF Out R | Uscita Digitale S/PDIF Destra | 
+| 16 – 31 | 0x10 – 0x1F | USB Audio Input 1 – 16 | Canali di registrazione inviati al Computer via USB (DAW In 1..16) | 
+| 32 – 47 | 0x20 – 0x2F | Mixer 1 Inputs (0–15) | Ingressi fisici verso i canali del Mixer Interno 1 | 
+| 48 – 63 | 0x30 – 0x3F | Mixer 2 Inputs (0–15) | Ingressi verso i canali del Mixer Interno 2 |
+

@@ -216,3 +216,5 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+/.DS_Store
+/docs/es9_user_manual_1.3.pdf
