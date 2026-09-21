@@ -1,10 +1,24 @@
-import customtkinter as ctk
+from __future__ import annotations
+
 import mido
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QScrollArea,
+    QSlider,
+    QSpinBox,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
-ctk.set_appearance_mode("Dark")
-ctk.set_default_color_theme("blue")
-
-# Header SysEx Expert Sleepers per ES-9: F0 00 21 27 19 ... F7
 SYSEX_HEADER = [0x00, 0x21, 0x27, 0x19]
 
 DSP_INPUT_OPTIONS = {
@@ -30,433 +44,284 @@ DSP_OUTPUT_OPTIONS = {
 }
 
 DSP_LOGICAL_GROUPS = {
-    "USB Audio": {
-        "count": 16,
-        "input_endpoints": [f"USB Audio Input {channel}" for channel in range(1, 17)],
-        "output_endpoints": [f"USB Audio Output {channel}" for channel in range(1, 17)],
-        "inputs": DSP_INPUT_OPTIONS,
-        "outputs": DSP_OUTPUT_OPTIONS,
-    },
-    "Mixer 1": {
-        "count": 8,
-        "input_endpoints": [f"Mixer 1 Input {channel}" for channel in range(8)],
-        "output_endpoints": [f"Mixer 1 Output {channel}" for channel in range(8)],
-        "inputs": DSP_INPUT_OPTIONS,
-        "outputs": DSP_OUTPUT_OPTIONS,
-    },
-    "Mixer 2 / S/PDIF": {
-        "count": 8,
-        "input_endpoints": [f"Mixer 2 Input {channel}" for channel in range(8)],
-        "output_endpoints": [f"Mixer 2 Output {channel}" for channel in range(8)],
-        "inputs": DSP_INPUT_OPTIONS,
-        "outputs": DSP_OUTPUT_OPTIONS,
-        "spdif_input_endpoints": ["S/PDIF In L", "S/PDIF In R"],
-        "spdif_output_endpoints": ["S/PDIF Out L", "S/PDIF Out R"],
-        "spdif_inputs": {"S/PDIF In L": 14, "S/PDIF In R": 15},
-        "spdif_outputs": {"S/PDIF Out L": 12, "S/PDIF Out R": 13},
-    },
+    "USB Audio": (16, [f"USB Audio Input {i}" for i in range(1, 17)], [f"USB Audio Output {i}" for i in range(1, 17)]),
+    "Mixer 1": (8, [f"Mixer 1 Input {i}" for i in range(8)], [f"Mixer 1 Output {i}" for i in range(8)]),
+    "Mixer 2": (8, [f"Mixer 2 Input {i}" for i in range(8)], [f"Mixer 2 Output {i}" for i in range(8)]),
+    "S/PDIF": (2, ["S/PDIF In L", "S/PDIF In R"], ["S/PDIF Out L", "S/PDIF Out R"]),
 }
 
 
 def int_to_3bytes(value: int) -> list[int]:
-    """Converte un intero (0..16383 o 24bit) in 3 byte MIDI a 7-bit (MSB -> LSB)."""
-    val = max(0, min(0x1FFFFF, value))
-    b0 = (val >> 14) & 0x7F
-    b1 = (val >> 7) & 0x7F
-    b2 = val & 0x7F
-    return [b0, b1, b2]
+    value = max(0, min(0x1FFFFF, value))
+    return [(value >> 14) & 0x7F, (value >> 7) & 0x7F, value & 0x7F]
 
 
-class ES9TotalHardwareController(ctk.CTk):
+class ES9TotalHardwareController(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.title("Expert Sleepers ES-9 Full Controller Pro")
-        self.geometry("1000x780")
-
+        self.setWindowTitle("Expert Sleepers ES-9 Hardware Control")
+        self.resize(1100, 800)
         self.midi_output = None
         self.midi_input = None
-
-        # --- TOP HEADER & MIDI SELECTION ---
-        self.setup_header()
-
-        # --- SYSTEM TOOLBAR (Flash / Reset / Info) ---
-        self.setup_system_bar()
-
-        # --- TAB VIEW PRINCIPALE ---
-        self.tabview = ctk.CTkTabview(self)
-        self.tabview.pack(fill="both", expand=True, padx=15, pady=10)
-
-        self.tab_matrix = self.tabview.add("Matrix Mixer (60H-6FH)")
-        self.tab_dsp = self.tabview.add("DSP Routing (40H-53H)")
-        self.tab_dc = self.tabview.add("DC Blocking & Offset (31H/36H)")
-        self.tab_options = self.tabview.add("Global Options & MIDI (32H/35H)")
-
-        # Inizializza le schede
-        self.setup_matrix_tab()
-        self.setup_dsp_tab()
-        self.setup_dc_tab()
-        self.setup_options_tab()
-
-        # Tenta connessione automatica
+        self._build_ui()
         self.refresh_midi_ports()
 
-    def send_sysex(self, cmd_bytes: list[int]):
-        """Invia un messaggio SysEx preceduto dall'header ES-9."""
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.addWidget(self._build_connection_bar())
+        root.addWidget(self._build_system_bar())
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self._build_matrix_tab(), "Matrix Mixer")
+        self.tabs.addTab(self._build_dsp_tab(), "DSP Routing")
+        self.tabs.addTab(self._build_dc_tab(), "DC Blocking & Offset")
+        self.tabs.addTab(self._build_options_tab(), "Global Options & MIDI")
+        root.addWidget(self.tabs)
+
+    def _build_connection_bar(self):
+        box = QGroupBox("MIDI")
+        layout = QHBoxLayout(box)
+        self.combo_out = QComboBox()
+        self.combo_in = QComboBox()
+        self.combo_out.currentTextChanged.connect(self.on_select_output)
+        self.combo_in.currentTextChanged.connect(self.on_select_input)
+        refresh = QPushButton("Refresh Ports")
+        refresh.clicked.connect(self.refresh_midi_ports)
+        self.status_label = QLabel("Disconnected")
+        layout.addWidget(QLabel("Out"))
+        layout.addWidget(self.combo_out, 1)
+        layout.addWidget(QLabel("In"))
+        layout.addWidget(self.combo_in, 1)
+        layout.addWidget(refresh)
+        layout.addWidget(self.status_label)
+        return box
+
+    def _build_system_bar(self):
+        box = QWidget()
+        layout = QHBoxLayout(box)
+        actions = [("Save Standalone", [0x24, 0x00]), ("Save Hosted", [0x24, 0x01]), ("Restore", [0x25, 0x00]), ("Reset Defaults", [0x26]), ("Req Version", [0x22]), ("Req Rate", [0x2C])]
+        for text, command in actions:
+            button = QPushButton(text)
+            button.clicked.connect(lambda checked=False, command=command: self.send_sysex(command))
+            layout.addWidget(button)
+        return box
+
+    def _build_matrix_tab(self):
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        self.current_mix_id = 0
+        self.mix_selector = QComboBox()
+        self.mix_selector.addItems([f"Mix {i}" for i in range(16)])
+        self.mix_selector.currentIndexChanged.connect(lambda value: setattr(self, "current_mix_id", value))
+        controls = QFormLayout()
+        controls.addRow("Mix", self.mix_selector)
+        virtual = QSlider(Qt.Horizontal)
+        virtual.setRange(0, 127)
+        virtual.valueChanged.connect(lambda value: self.send_sysex([0x34, self.current_mix_id, value]))
+        controls.addRow("Virtual mix", virtual)
+        layout.addLayout(controls)
+        for channel in range(8):
+            slider = QSlider(Qt.Vertical)
+            slider.setRange(0, 16383)
+            slider.valueChanged.connect(lambda value, channel=channel: self.send_sysex([0x60 + self.current_mix_id, channel] + int_to_3bytes(value)))
+            layout.addWidget(slider)
+        return page
+
+    def _build_dsp_tab(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(QLabel("Logical DSP routing"))
+        toolbar.addStretch()
+        send = QPushButton("Set routing")
+        send.clicked.connect(self.send_dsp_logical_routing)
+        toolbar.addWidget(send)
+        layout.addLayout(toolbar)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        groups = QVBoxLayout(content)
+        self.dsp_rows = []
+        self.dsp_groups_layout = groups
+        self.dsp_last_group_mode = "Mixer 2"
+        channel = 0
+        for group_name in ("USB Audio", "Mixer 1"):
+            channel = self._add_dsp_group(groups, group_name, channel)
+        self._add_dsp_group_selector(groups, channel)
+        groups.addStretch()
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+        return page
+
+    def _add_dsp_group_selector(self, parent, start_channel):
+        self.dsp_last_group_box = QGroupBox()
+        group_layout = QVBoxLayout(self.dsp_last_group_box)
+        self.dsp_last_group_layout = group_layout
+        selector = QComboBox()
+        selector.addItems(["Mixer 2", "S/PDIF"])
+        selector.currentTextChanged.connect(self._change_dsp_last_group)
+        self.dsp_last_group_selector = selector
+        group_layout.addWidget(selector)
+        self.dsp_last_group_rows = QWidget()
+        group_layout.addWidget(self.dsp_last_group_rows)
+        parent.addWidget(self.dsp_last_group_box)
+        self._change_dsp_last_group("Mixer 2", start_channel)
+
+    def _add_dsp_group(self, parent, group_name, start_channel):
+        count, input_endpoints, output_endpoints = DSP_LOGICAL_GROUPS[group_name]
+        group_box = QGroupBox(group_name)
+        group_layout = QFormLayout(group_box)
+        for index in range(count):
+            row = QHBoxLayout()
+            input_combo = QComboBox()
+            output_combo = QComboBox()
+            input_combo.addItems(DSP_INPUT_OPTIONS)
+            output_combo.addItems(DSP_OUTPUT_OPTIONS)
+            channel = start_channel + index
+            input_combo.setCurrentIndex(channel % len(DSP_INPUT_OPTIONS))
+            output_combo.setCurrentIndex(channel % len(DSP_OUTPUT_OPTIONS))
+            row.addWidget(QLabel(input_endpoints[index]))
+            row.addWidget(input_combo, 1)
+            row.addWidget(QLabel(output_endpoints[index]))
+            row.addWidget(output_combo, 1)
+            group_layout.addRow(f"DSP {channel + 1:02}", row)
+            self.dsp_rows.append((input_combo, output_combo))
+        parent.addWidget(group_box)
+        return start_channel + count
+
+    def _change_dsp_last_group(self, mode, start_channel=None):
+        if start_channel is None:
+            start_channel = 24
+        self.dsp_last_group_mode = mode
+        old_rows = self.dsp_last_group_rows
+        self.dsp_last_group_layout.removeWidget(old_rows)
+        old_rows.deleteLater()
+        count, input_endpoints, output_endpoints = DSP_LOGICAL_GROUPS[mode]
+        rows_widget = QWidget()
+        rows_layout = QFormLayout(rows_widget)
+        for index in range(count):
+            row = QHBoxLayout()
+            input_combo = QComboBox()
+            output_combo = QComboBox()
+            input_combo.addItems(DSP_INPUT_OPTIONS)
+            output_combo.addItems(DSP_OUTPUT_OPTIONS)
+            channel = start_channel + index
+            input_combo.setCurrentIndex(channel % len(DSP_INPUT_OPTIONS))
+            output_combo.setCurrentIndex(channel % len(DSP_OUTPUT_OPTIONS))
+            row.addWidget(QLabel(input_endpoints[index]))
+            row.addWidget(input_combo, 1)
+            row.addWidget(QLabel(output_endpoints[index]))
+            row.addWidget(output_combo, 1)
+            rows_layout.addRow(f"DSP {channel + 1:02}", row)
+            if len(self.dsp_rows) > start_channel + index:
+                self.dsp_rows[start_channel + index] = (input_combo, output_combo)
+            else:
+                self.dsp_rows.append((input_combo, output_combo))
+        self.dsp_rows = self.dsp_rows[:start_channel + count]
+        self.dsp_last_group_rows = rows_widget
+        self.dsp_last_group_layout.addWidget(rows_widget)
+
+    def _build_dc_tab(self):
+        page = QWidget()
+        layout = QHBoxLayout(page)
+        hpf = QGroupBox("DC-blocking HPF")
+        hpf_layout = QVBoxLayout(hpf)
+        self.hpf_switches = []
+        for index in range(14):
+            button = QPushButton(f"Input {index + 1}")
+            button.setCheckable(True)
+            button.clicked.connect(self.on_hpf_change)
+            hpf_layout.addWidget(button)
+            self.hpf_switches.append(button)
+        offsets = QGroupBox("DC Offset")
+        offset_layout = QFormLayout(offsets)
+        for channel in range(14):
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(0, 16383)
+            slider.setValue(8192)
+            slider.valueChanged.connect(lambda value, channel=channel: self.send_sysex([0x36, channel] + int_to_3bytes(value)))
+            offset_layout.addRow(f"Ch {channel + 1}", slider)
+        layout.addWidget(hpf)
+        layout.addWidget(offsets)
+        return page
+
+    def _build_options_tab(self):
+        page = QWidget()
+        layout = QFormLayout(page)
+        mixer2 = QPushButton("Mixer 2")
+        mixer2.setCheckable(True)
+        midi_thru = QPushButton("MIDI Thru")
+        midi_thru.setCheckable(True)
+        send_options = lambda: self.send_sysex([0x32, (1 if mixer2.isChecked() else 0) | (2 if midi_thru.isChecked() else 0)])
+        mixer2.clicked.connect(send_options)
+        midi_thru.clicked.connect(send_options)
+        usb = QSpinBox()
+        din = QSpinBox()
+        usb.setRange(1, 16)
+        din.setRange(1, 16)
+        set_midi = QPushButton("Set MIDI channels")
+        set_midi.clicked.connect(lambda: self.send_sysex([0x35, usb.value() - 1, din.value() - 1]))
+        layout.addRow(mixer2)
+        layout.addRow(midi_thru)
+        layout.addRow("USB MIDI channel", usb)
+        layout.addRow("DIN MIDI channel", din)
+        layout.addRow(set_midi)
+        return page
+
+    def send_sysex(self, command):
         if self.midi_output:
-            full_data = SYSEX_HEADER + cmd_bytes
-            msg = mido.Message('sysex', data=full_data)
-            self.midi_output.send(msg)
-
-    # --- HEADER & CONNESSIO NE MIDI ---
-    def setup_header(self):
-        header_frame = ctk.CTkFrame(self)
-        header_frame.pack(fill="x", padx=15, pady=(10, 5))
-
-        title = ctk.CTkLabel(header_frame, text="EXPERT SLEEPERS ES-9 HARDWARE CONTROL", font=("Arial", 16, "bold"))
-        title.pack(side="top", pady=5)
-
-        conn_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
-        conn_frame.pack(fill="x", pady=5, padx=10)
-
-        ctk.CTkLabel(conn_frame, text="MIDI Out:").pack(side="left", padx=5)
-        self.combo_out = ctk.CTkOptionMenu(conn_frame, command=self.on_select_output)
-        self.combo_out.pack(side="left", padx=5)
-
-        ctk.CTkLabel(conn_frame, text="MIDI In:").pack(side="left", padx=(15, 5))
-        self.combo_in = ctk.CTkOptionMenu(conn_frame, command=self.on_select_input)
-        self.combo_in.pack(side="left", padx=5)
-
-        btn_refresh = ctk.CTkButton(conn_frame, text="Refresh Ports", width=100, command=self.refresh_midi_ports)
-        btn_refresh.pack(side="right", padx=5)
-
-        self.status_label = ctk.CTkLabel(self, text="Status: Disconnected", text_color="orange")
-        self.status_label.pack(pady=2)
+            self.midi_output.send(mido.Message("sysex", data=SYSEX_HEADER + command))
 
     def refresh_midi_ports(self):
-        try:
-            outputs = mido.get_output_names()
-            inputs = mido.get_input_names()
+        outputs = mido.get_output_names()
+        inputs = mido.get_input_names()
+        self.combo_out.blockSignals(True)
+        self.combo_in.blockSignals(True)
+        self.combo_out.clear()
+        self.combo_in.clear()
+        self.combo_out.addItems(outputs)
+        self.combo_in.addItems(inputs)
+        self.combo_out.blockSignals(False)
+        self.combo_in.blockSignals(False)
+        if outputs:
+            self.combo_out.setCurrentText(next((p for p in outputs if "ES-9" in p or "ES9" in p), outputs[0]))
+            self.on_select_output(self.combo_out.currentText())
+        if inputs:
+            self.combo_in.setCurrentText(next((p for p in inputs if "ES-9" in p or "ES9" in p), inputs[0]))
+            self.on_select_input(self.combo_in.currentText())
 
-            self.combo_out.configure(values=outputs if outputs else ["Nessuna porta"])
-            self.combo_in.configure(values=inputs if inputs else ["Nessuna porta"])
-
-            es9_out = next((p for p in outputs if "ES-9" in p or "ES9" in p), outputs[0] if outputs else None)
-            es9_in = next((p for p in inputs if "ES-9" in p or "ES9" in p), inputs[0] if inputs else None)
-
-            if es9_out:
-                self.combo_out.set(es9_out)
-                self.on_select_output(es9_out)
-            if es9_in:
-                self.combo_in.set(es9_in)
-                self.on_select_input(es9_in)
-        except Exception as e:
-            self.status_label.configure(text=f"Errore ricerca porte: {e}", text_color="red")
-
-    def on_select_output(self, port_name):
-        try:
-            if self.midi_output:
-                self.midi_output.close()
-            self.midi_output = mido.open_output(port_name)
-            self.update_status()
-        except Exception as e:
-            self.status_label.configure(text=f"Errore apertura Out {port_name}: {e}", text_color="red")
-
-    def on_select_input(self, port_name):
-        try:
-            if self.midi_input:
-                self.midi_input.close()
-            self.midi_input = mido.open_input(port_name, callback=self.on_midi_receive)
-            self.update_status()
-        except Exception as e:
-            self.status_label.configure(text=f"Errore apertura In {port_name}: {e}", text_color="red")
-
-    def update_status(self):
+    def on_select_output(self, name):
+        if not name:
+            return
         if self.midi_output:
-            self.status_label.configure(text=f"Connesso: OUT={self.midi_output.name}", text_color="green")
-        else:
-            self.status_label.configure(text="Scollegato", text_color="red")
+            self.midi_output.close()
+        self.midi_output = mido.open_output(name)
+        self.status_label.setText(f"Connected: OUT={name}")
 
-    def on_midi_receive(self, msg):
-        """Callback per i messaggi SysEx ricevuti dall'ES-9 (es. 32H String/Status, 14H Sample Rate)."""
-        if msg.type == 'sysex' and list(msg.data[:4]) == SYSEX_HEADER:
-            msg_type = msg.data[4]
-            if msg_type == 0x32:  # Message ASCII string response
-                txt = "".join(chr(b) for b in msg.data[5:] if b != 0)
-                print(f"[ES-9 Response]: {txt}")
-            elif msg_type == 0x14:  # Sample Rate response
-                sr = (msg.data[5] << 14) | (msg.data[6] << 7) | msg.data[7]
-                print(f"[ES-9 Sample Rate]: {sr} Hz")
+    def on_select_input(self, name):
+        if not name:
+            return
+        if self.midi_input:
+            self.midi_input.close()
+        self.midi_input = mido.open_input(name, callback=self.on_midi_receive)
 
-    # --- SYSTEM TOOLBAR ---
-    def setup_system_bar(self):
-        sys_frame = ctk.CTkFrame(self, fg_color="transparent")
-        sys_frame.pack(fill="x", padx=15, pady=2)
-
-        ctk.CTkButton(sys_frame, text="Save Standalone (24H)", width=130, command=lambda: self.send_sysex([0x24, 0x00])).pack(side="left", padx=3)
-        ctk.CTkButton(sys_frame, text="Save Hosted (24H)", width=130, command=lambda: self.send_sysex([0x24, 0x01])).pack(side="left", padx=3)
-        ctk.CTkButton(sys_frame, text="Restore (25H)", width=110, command=lambda: self.send_sysex([0x25, 0x00])).pack(side="left", padx=3)
-        ctk.CTkButton(sys_frame, text="Reset Defaults (26H)", width=130, fg_color="darkred", command=lambda: self.send_sysex([0x26])).pack(side="left", padx=3)
-
-        ctk.CTkButton(sys_frame, text="Req Version (22H)", width=120, command=lambda: self.send_sysex([0x22])).pack(side="right", padx=3)
-        ctk.CTkButton(sys_frame, text="Req Rate (2CH)", width=110, command=lambda: self.send_sysex([0x2C])).pack(side="right", padx=3)
-
-    # --- 1. TAB: MATRIX MIXER (60H-6FH) ---
-    def setup_matrix_tab(self):
-        top_bar = ctk.CTkFrame(self.tab_matrix)
-        top_bar.pack(fill="x", padx=10, pady=5)
-
-        ctk.CTkLabel(top_bar, text="Seleziona ID Mix (0 - 15):", font=("Arial", 12, "bold")).pack(side="left", padx=10)
-        self.current_mix_id = 0
-        mix_options = [f"Mix {i}" for i in range(16)]
-        self.mix_selector = ctk.CTkOptionMenu(top_bar, values=mix_options, command=self.on_mix_select)
-        self.mix_selector.pack(side="left", padx=10)
-
-        # Virtual Mix Control (34H)
-        ctk.CTkLabel(top_bar, text="Virtual Mix Level (34H):").pack(side="left", padx=(30, 5))
-        self.virt_mix_slider = ctk.CTkSlider(top_bar, from_=0, to=127, command=self.on_virtual_mix_change)
-        self.virt_mix_slider.set(0)
-        self.virt_mix_slider.pack(side="left", padx=5)
-
-        # Sub-frame faders per i 8 canali del Mix attivo
-        self.faders_frame = ctk.CTkFrame(self.tab_matrix)
-        self.faders_frame.pack(fill="both", expand=True, padx=10, pady=10)
-
-        self.mix_sliders = []
-        for ch in range(8):
-            ch_box = ctk.CTkFrame(self.faders_frame)
-            ch_box.pack(side="left", fill="both", expand=True, padx=4, pady=5)
-
-            ctk.CTkLabel(ch_box, text=f"Ch {ch}", font=("Arial", 11, "bold")).pack(pady=5)
-
-            slider = ctk.CTkSlider(
-                ch_box, orientation="vertical", from_=0, to=16383, number_of_steps=128,
-                command=lambda val, c=ch: self.on_fader_change(c, val)
-            )
-            slider.set(0)
-            slider.pack(expand=True, fill="y", pady=10)
-
-            lbl_val = ctk.CTkLabel(ch_box, text="0")
-            lbl_val.pack(pady=5)
-
-            self.mix_sliders.append({"slider": slider, "label": lbl_val})
-
-    def on_mix_select(self, val_str):
-        self.current_mix_id = int(val_str.split()[-1])
-
-    def on_fader_change(self, channel, val):
-        int_val = int(val)
-        self.mix_sliders[channel]["label"].configure(text=str(int_val))
-        bytes3 = int_to_3bytes(int_val)
-        # Comando 60H + mix_id
-        cmd = [0x60 + self.current_mix_id, channel] + bytes3
-        self.send_sysex(cmd)
-
-    def on_virtual_mix_change(self, val):
-        # Comando 34H <mix> <level>
-        self.send_sysex([0x34, self.current_mix_id, int(val)])
-
-    # --- 2. TAB: DSP ROUTING (40H-43H & 50H-53H) ---
-    def setup_dsp_tab(self):
-        toolbar = ctk.CTkFrame(self.tab_dsp)
-        toolbar.pack(fill="x", padx=10, pady=(10, 4))
-
-        ctk.CTkLabel(toolbar, text="Logical DSP routing", font=("Arial", 13, "bold")).pack(side="left", padx=8)
-        ctk.CTkButton(toolbar, text="Set routing", width=110, command=self.send_dsp_logical_routing).pack(side="right", padx=8)
-
-        ctk.CTkLabel(
-            self.tab_dsp,
-            text="Suddivisione logica dei 32 canali DSP: USB Audio 16, Mixer 1 8 e Mixer 2 oppure S/PDIF.",
-            anchor="w",
-        ).pack(fill="x", padx=18, pady=(0, 4))
-
-        scroll = ctk.CTkScrollableFrame(self.tab_dsp)
-        scroll.pack(fill="both", expand=True, padx=10, pady=6)
-        self.dsp_logical_scroll = scroll
-        self.dsp_logical_rows = []
-        self.dsp_input_routing = list(range(32))
-        self.dsp_output_routing = list(range(32))
-        self.dsp_last_group_mode = "Mixer 2"
-
-        self.rebuild_logical_groups()
-
-    def rebuild_logical_groups(self):
-        for child in self.dsp_logical_scroll.winfo_children():
-            child.destroy()
-        self.dsp_logical_rows = []
-        for group_name, group in DSP_LOGICAL_GROUPS.items():
-            self.build_logical_group(self.dsp_logical_scroll, group_name, group)
-
-    def build_logical_group(self, parent, group_name, group):
-        group_frame = ctk.CTkFrame(parent)
-        group_frame.pack(fill="x", padx=6, pady=6)
-
-        title_row = ctk.CTkFrame(group_frame, fg_color="transparent")
-        title_row.pack(fill="x", padx=8, pady=(6, 2))
-        ctk.CTkLabel(title_row, text=group_name, font=("Arial", 13, "bold")).pack(side="left")
-
-        input_endpoints = group["input_endpoints"]
-        output_endpoints = group["output_endpoints"]
-        input_options = group["inputs"]
-        output_options = group["outputs"]
-        if group_name == "Mixer 2 / S/PDIF":
-            if self.dsp_last_group_mode == "S/PDIF":
-                input_endpoints = group["spdif_input_endpoints"]
-                output_endpoints = group["spdif_output_endpoints"]
-            source_mode = ctk.StringVar(value="Mixer 2")
-            source_mode.set(self.dsp_last_group_mode)
-            ctk.CTkSegmentedButton(
-                title_row,
-                values=["Mixer 2", "S/PDIF"],
-                variable=source_mode,
-                command=self.on_last_group_mode_change,
-            ).pack(side="right")
-
-        header = ctk.CTkFrame(group_frame, fg_color="transparent")
-        header.pack(fill="x", padx=8)
-        ctk.CTkLabel(header, text="Canale", width=70, anchor="w").pack(side="left")
-        ctk.CTkLabel(header, text="Input fisso", width=180, anchor="w").pack(side="left", padx=4)
-        ctk.CTkLabel(header, text="Sorgente selezionata", width=250, anchor="w").pack(side="left", padx=4)
-        ctk.CTkLabel(header, text="Output fisso", width=180, anchor="w").pack(side="left", padx=4)
-        ctk.CTkLabel(header, text="Destinazione selezionata", width=250, anchor="w").pack(side="left", padx=4)
-
-        rows = []
-        start_index = len(self.dsp_logical_rows)
-        channel_count = 2 if group_name == "Mixer 2 / S/PDIF" and self.dsp_last_group_mode == "S/PDIF" else group["count"]
-        for channel in range(channel_count):
-            row = ctk.CTkFrame(group_frame, fg_color="transparent")
-            row.pack(fill="x", padx=8, pady=2)
-            ctk.CTkLabel(row, text=f"{start_index + channel + 1:02}", width=70, anchor="w").pack(side="left")
-            ctk.CTkLabel(row, text=input_endpoints[channel], width=180, anchor="w").pack(side="left", padx=4)
-            input_menu = ctk.CTkOptionMenu(row, values=list(input_options), width=250)
-            input_menu.set(list(input_options)[channel % len(input_options)])
-            input_menu.pack(side="left", padx=4)
-            ctk.CTkLabel(row, text=output_endpoints[channel], width=180, anchor="w").pack(side="left", padx=4)
-            output_menu = ctk.CTkOptionMenu(row, values=list(output_options), width=250)
-            output_menu.set(list(output_options)[channel % len(output_options)])
-            output_menu.pack(side="left", padx=4)
-            rows.append((input_menu, output_menu))
-            self.dsp_logical_rows.append((input_menu, output_menu, input_options, output_options))
-
-    def on_last_group_mode_change(self, mode):
-        self.dsp_last_group_mode = mode
-        self.rebuild_logical_groups()
-
-    def send_dsp_logical_routing(self):
-        input_routing = [input_options[input_menu.get()] for input_menu, _, input_options, _ in self.dsp_logical_rows]
-        output_routing = [output_options[output_menu.get()] for _, output_menu, _, output_options in self.dsp_logical_rows]
-        input_routing = (input_routing + self.dsp_input_routing[len(input_routing):])[:32]
-        output_routing = (output_routing + self.dsp_output_routing[len(output_routing):])[:32]
-        self.dsp_input_routing = input_routing
-        self.dsp_output_routing = output_routing
-        for dsp_id in range(4):
-            start = dsp_id * 8
-            self.send_sysex([0x40 + dsp_id] + input_routing[start:start + 8])
-            self.send_sysex([0x50 + dsp_id] + output_routing[start:start + 8])
-
-    # --- 3. TAB: DC BLOCKING & DC OFFSET (31H & 36H) ---
-    def setup_dc_tab(self):
-        container = ctk.CTkFrame(self.tab_dc)
-        container.pack(fill="both", expand=True, padx=10, pady=10)
-
-        # Left Section: HPF Filter switches (31H)
-        hpf_box = ctk.CTkFrame(container)
-        hpf_box.pack(side="left", fill="both", expand=True, padx=5, pady=5)
-
-        ctk.CTkLabel(hpf_box, text="DC-Blocking Filters HPF (31H)", font=("Arial", 12, "bold")).pack(pady=10)
-        ctk.CTkLabel(hpf_box, text="Attiva per bloccare la DC (Modalità Audio Passa-Alto)", font=("Arial", 10, "italic")).pack(pady=2)
-
-        self.hpf_switches = []
-        for i in range(14):
-            sw = ctk.CTkSwitch(hpf_box, text=f"Input {i+1}", command=self.on_hpf_change)
-            sw.pack(anchor="w", padx=20, pady=3)
-            self.hpf_switches.append(sw)
-
-        # Right Section: DC Offset per channel (36H)
-        offset_box = ctk.CTkScrollableFrame(container)
-        offset_box.pack(side="right", fill="both", expand=True, padx=5, pady=5)
-
-        ctk.CTkLabel(offset_box, text="Set Channel DC Offset (36H)", font=("Arial", 12, "bold")).pack(pady=10)
-
-        self.offset_entries = []
-        for ch in range(14):
-            row = ctk.CTkFrame(offset_box, fg_color="transparent")
-            row.pack(fill="x", pady=3, padx=5)
-
-            ctk.CTkLabel(row, text=f"Ch {ch+1}:", width=60, anchor="w").pack(side="left")
-
-            slider = ctk.CTkSlider(row, from_=0, to=16383, command=lambda val, c=ch: self.on_dc_offset_slide(c, val))
-            slider.set(8192)  # Zero offset
-            slider.pack(side="left", expand=True, fill="x", padx=5)
-
-            lbl = ctk.CTkLabel(row, text="8192", width=50)
-            lbl.pack(side="right")
-            self.offset_entries.append({"slider": slider, "label": lbl})
+    def on_midi_receive(self, message):
+        if message.type == "sysex" and list(message.data[:4]) == SYSEX_HEADER:
+            print(f"[ES-9 Response]: {list(message.data[4:])}")
 
     def on_hpf_change(self):
-        hpf_mask = 0
-        for idx, sw in enumerate(self.hpf_switches):
-            if sw.get():
-                hpf_mask |= (1 << idx)
-        # Invia comando 31H con bitmask
-        self.send_sysex([0x31, hpf_mask & 0x7F, (hpf_mask >> 7) & 0x7F])
+        mask = sum((1 << index) for index, button in enumerate(self.hpf_switches) if button.isChecked())
+        self.send_sysex([0x31, mask & 0x7F, (mask >> 7) & 0x7F])
 
-    def on_dc_offset_slide(self, channel, val):
-        int_val = int(val)
-        self.offset_entries[channel]["label"].configure(text=str(int_val))
-        bytes3 = int_to_3bytes(int_val)
-        # Comando 36H <channel> <3 bytes>
-        self.send_sysex([0x36, channel] + bytes3)
+    def send_dsp_logical_routing(self):
+        input_values = [DSP_INPUT_OPTIONS[combo.currentText()] for combo, _ in self.dsp_rows]
+        output_values = [DSP_OUTPUT_OPTIONS[combo.currentText()] for _, combo in self.dsp_rows]
+        for dsp_id in range(4):
+            start = dsp_id * 8
+            self.send_sysex([0x40 + dsp_id] + input_values[start:start + 8])
+            self.send_sysex([0x50 + dsp_id] + output_values[start:start + 8])
 
-    # --- 4. TAB: OPTIONS & MIDI (32H, 33H, 35H) ---
-    def setup_options_tab(self):
-        container = ctk.CTkFrame(self.tab_options)
-        container.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # Global Options (32H)
-        opt_box = ctk.CTkFrame(container)
-        opt_box.pack(fill="x", padx=10, pady=10)
-
-        ctk.CTkLabel(opt_box, text="Opzioni Generali Hardware (32H)", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=5)
-
-        self.sw_mixer2 = ctk.CTkSwitch(opt_box, text="Usa Mixer 2 invece di S/PDIF (Bit 0)", command=self.on_options_change)
-        self.sw_mixer2.pack(anchor="w", padx=20, pady=5)
-
-        self.sw_midi_thru = ctk.CTkSwitch(opt_box, text="Abilita MIDI Thru (Bit 1)", command=self.on_options_change)
-        self.sw_midi_thru.pack(anchor="w", padx=20, pady=5)
-
-        # MIDI Channels Setup (35H)
-        midi_box = ctk.CTkFrame(container)
-        midi_box.pack(fill="x", padx=10, pady=10)
-
-        ctk.CTkLabel(midi_box, text="Configurazione Canali MIDI (35H)", font=("Arial", 12, "bold")).pack(anchor="w", padx=10, pady=5)
-
-        ch_row = ctk.CTkFrame(midi_box, fg_color="transparent")
-        ch_row.pack(fill="x", padx=10, pady=5)
-
-        ctk.CTkLabel(ch_row, text="USB MIDI Ch (1-16):").pack(side="left", padx=5)
-        self.combo_usb_ch = ctk.CTkOptionMenu(ch_row, values=[str(i) for i in range(1, 17)])
-        self.combo_usb_ch.set("1")
-        self.combo_usb_ch.pack(side="left", padx=5)
-
-        ctk.CTkLabel(ch_row, text="DIN MIDI Ch (1-16):").pack(side="left", padx=(20, 5))
-        self.combo_din_ch = ctk.CTkOptionMenu(ch_row, values=[str(i) for i in range(1, 17)])
-        self.combo_din_ch.set("1")
-        self.combo_din_ch.pack(side="left", padx=5)
-
-        btn_set_midi = ctk.CTkButton(ch_row, text="Set MIDI Ch", command=self.on_set_midi_channels)
-        btn_set_midi.pack(side="left", padx=20)
-
-    def on_options_change(self):
-        opts = 0
-        if self.sw_mixer2.get():
-            opts |= 0x01
-        if self.sw_midi_thru.get():
-            opts |= 0x02
-        # Comando 32H <options>
-        self.send_sysex([0x32, opts])
-
-    def on_set_midi_channels(self):
-        usb_ch = int(self.combo_usb_ch.get()) - 1
-        din_ch = int(self.combo_din_ch.get()) - 1
-        # Comando 35H <USB MIDI channel> <DIN MIDI channel>
-        self.send_sysex([0x35, usb_ch, din_ch])
+def create_application():
+    return QApplication.instance() or QApplication([])
