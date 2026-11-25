@@ -1,0 +1,266 @@
+:root {
+  --bg: #0d0f14;
+  --bg-2: #11141b;
+  --panel: #161a23;
+  --panel-2: #1c212c;
+  --panel-3: #232937;
+  --border: #262c3a;
+  --border-2: #323a4c;
+  --text: #e7e9ef;
+  --text-2: #b4bac8;
+  --muted: #7d8598;
+  --faint: #545c6e;
+  --accent: #2dd4bf;
+  --accent-2: #14b8a6;
+  --accent-soft: rgba(45, 212, 191, 0.14);
+  --amber: #fbbf24;
+  --violet: #a78bfa;
+  --rose: #fb7185;
+  --sky: #38bdf8;
+  --danger: #f43f5e;
+  --success: #22c55e;
+
+  --radius: 10px;
+  --radius-sm: 7px;
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", system-ui, sans-serif;
+  --mono: "SF Mono", ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+
+  color-scheme: dark;
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+button,
+select,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--panel-3);
+  border-radius: 10px;
+  border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ───── Buttons ───── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-2);
+  background: var(--panel-2);
+  color: var(--text);
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    background 0.12s,
+    border-color 0.12s,
+    transform 0.05s;
+}
+.btn:hover:not(:disabled) {
+  background: var(--panel-3);
+  border-color: #3d4659;
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn:disabled {
+  opacity: 0.45;
+}
+.btn.primary {
+  background: var(--accent-2);
+  border-color: var(--accent);
+  color: #04201c;
+}
+.btn.primary:hover:not(:disabled) {
+  background: var(--accent);
+}
+.btn.danger {
+  color: #ffd5dc;
+  border-color: rgba(244, 63, 94, 0.5);
+  background: rgba(244, 63, 94, 0.12);
+}
+.btn.danger:hover:not(:disabled) {
+  background: rgba(244, 63, 94, 0.22);
+}
+.btn.ghost {
+  background: transparent;
+  border-color: transparent;
+}
+.btn.ghost:hover:not(:disabled) {
+  background: var(--panel-2);
+}
+.btn.sm {
+  height: 24px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+.btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* ───── Cards ───── */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px 10px;
+}
+.card-title {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+.card-sub {
+  color: var(--muted);
+  font-size: 12px;
+}
+.card-body {
+  padding: 0 14px 14px;
+}
+
+.page {
+  padding: 22px 26px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 1600px;
+}
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  margin-bottom: 2px;
+}
+.page-title {
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 0;
+}
+.page-desc {
+  color: var(--muted);
+  margin: 2px 0 0;
+}
+.spacer {
+  flex: 1;
+}
+
+.label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ───── Segmented control ───── */
+.seg {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+}
+.seg button {
+  white-space: nowrap;
+  border: 0;
+  background: transparent;
+  height: 24px;
+  padding: 0 12px;
+  border-radius: 6px;
+  color: var(--text-2);
+  font-weight: 500;
+}
+.seg button.on {
+  background: var(--panel-3);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+.seg button:disabled {
+  opacity: 0.4;
+}
+
+/* ───── Pill toggles ───── */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-2);
+  background: var(--panel-2);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 500;
+  transition: all 0.12s;
+}
+.pill:hover {
+  border-color: #3f4860;
+  color: var(--text);
+}
+.pill .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  transition: background 0.12s;
+}
+.pill.on {
+  background: var(--accent-soft);
+  border-color: rgba(45, 212, 191, 0.55);
+  color: var(--text);
+}
+.pill.on .dot {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+
+.empty {
+  color: var(--muted);
+  padding: 40px;
+  text-align: center;
+}
