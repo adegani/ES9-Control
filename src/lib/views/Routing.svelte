@@ -3,6 +3,11 @@
   import { CAPTURE_GROUPS, linkGroups, OUTPUT_GROUPS } from "../protocol";
   import Select from "../components/Select.svelte";
   import Icon from "../components/Icon.svelte";
+  import PatchBay from "../components/PatchBay.svelte";
+
+  type Mode = "patch" | "lists";
+  let mode = $state<Mode>(localStorage.getItem("es9.routingMode") === "lists" ? "lists" : "patch");
+  $effect(() => localStorage.setItem("es9.routingMode", mode));
 
   const cfg = $derived(es9.cfg);
 
@@ -67,7 +72,20 @@
       <h1 class="page-title">Routing</h1>
       <p class="page-desc">Choose the sources feeding each DSP block and where its outputs go. Stereo-linked sources set both channels of a pair.</p>
     </div>
+    <div class="spacer"></div>
+    <div class="seg">
+      <button class:on={mode === "patch"} onclick={() => (mode = "patch")}>Patch bay</button>
+      <button class:on={mode === "lists"} onclick={() => (mode = "lists")}>Lists</button>
+    </div>
   </div>
+
+  {#if mode === "patch"}
+  <section class="card">
+    <div class="card-body patch">
+      <PatchBay />
+    </div>
+  </section>
+  {:else}
 
   <section class="card">
     <div class="card-head">
@@ -115,6 +133,8 @@
     </section>
   </div>
 
+  {/if}
+
   <section class="card">
     <div class="card-head">
       <div class="card-title">Stereo links</div>
@@ -138,6 +158,9 @@
 </div>
 
 <style>
+  .patch {
+    padding: 14px 18px 18px;
+  }
   .flow {
     display: flex;
     flex-direction: column;
