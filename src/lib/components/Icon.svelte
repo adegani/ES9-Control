@@ -21,6 +21,9 @@
     upload: "M12 16V4M7 9l5-5 5 5M5 20h14",
     download: "M12 4v12M7 11l5 5 5-5M5 20h14",
     reset: "M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5",
+    undo: "M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
+    redo: "M15 14l5-5-5-5M20 9H9.5a5.5 5.5 0 0 0 0 11H13",
+    folder: "M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z",
   } as const;
   let { name, size = 16 }: Props = $props();
 </script>

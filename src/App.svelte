@@ -37,6 +37,10 @@
       if (n >= 1 && n <= VIEWS.length) {
         view = VIEWS[n - 1].id;
         e.preventDefault();
+      } else if (e.key.toLowerCase() === "z" && !(e.target as Element).closest("input, textarea")) {
+        if (e.shiftKey) es9.redo();
+        else es9.undo();
+        e.preventDefault();
       } else if (e.key === "r") {
         es9.requestConfig();
         e.preventDefault();
@@ -51,11 +55,19 @@
         saveOpen = false;
       }
     };
+    // The unit never reports changes made elsewhere (other software, the front-panel
+    // knob): re-read it whenever the user comes back to the window.
+    const onFocus = () => es9.autoSync();
+    const onVisible = () => document.visibilityState === "visible" && es9.autoSync();
     window.addEventListener("keydown", onKey);
     window.addEventListener("pointerdown", onDown);
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   });
 
@@ -131,11 +143,25 @@
 
     <div class="spacer" data-tauri-drag-region></div>
 
+    <div class="history">
+      <button class="btn icon" disabled={!es9.connected || !es9.canUndo} onclick={() => es9.undo()} title="Undo (⌘Z)" aria-label="Undo">
+        <Icon name="undo" />
+      </button>
+      <button class="btn icon" disabled={!es9.connected || !es9.canRedo} onclick={() => es9.redo()} title="Redo (⇧⌘Z)" aria-label="Redo">
+        <Icon name="redo" />
+      </button>
+    </div>
     <button class="btn" disabled={!es9.connected} onclick={() => es9.requestConfig()} title="Reload config from ES-9 (⌘R)">
       <Icon name="refresh" /> Sync
     </button>
     <div class="pop-anchor">
-      <button class="btn primary" disabled={!es9.connected} onclick={() => { saveOpen = !saveOpen; portsOpen = false; }}>
+      <button
+        class="btn primary"
+        disabled={!es9.connected}
+        onclick={() => { saveOpen = !saveOpen; portsOpen = false; }}
+        title={es9.unsaved ? "Changes made since the last save to / load from flash will be lost on power-off" : "Save the current state to flash"}
+      >
+        {#if es9.unsaved}<span class="unsaved-dot" aria-label="Unsaved changes"></span>{/if}
         <Icon name="save" /> Save to flash <Icon name="chevron" size={12} />
       </button>
       {#if saveOpen}
@@ -191,6 +217,22 @@
 </div>
 
 <style>
+  .history {
+    display: flex;
+    gap: 4px;
+  }
+  .btn.icon {
+    width: 30px;
+    padding: 0;
+    justify-content: center;
+  }
+  .unsaved-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--amber);
+    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.25);
+  }
   .app {
     display: grid;
     grid-template-columns: 196px 1fr;

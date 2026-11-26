@@ -4,14 +4,22 @@
  * be developed without hardware.
  */
 import {
+  applySetMessage,
   build,
+  CONFIG_CHUNKS,
+  CONFIG_DUMP_BYTES,
   defaultConfig,
   encodeConfigDump,
   encodeMixDump,
   HEADER,
   hzToEqFreq,
   isEs9Sysex,
+  OPT_MIXER2,
+  parseIncoming,
+  RX,
+  SYSEX_END,
   TX,
+  vmixSlotIsPan,
   type Es9Config,
 } from "./protocol";
 
@@ -88,8 +96,23 @@ function simulatedConfig(): Es9Config {
   return c;
 }
 
+/** Rough model of the unit's two "reset to defaults" variants (checked on hardware for the routing). */
+function defaultsFor(kind: "hosted" | "standalone"): Es9Config {
+  const c = simulatedConfig();
+  if (kind === "hosted") return c;
+  c.options = OPT_MIXER2;
+  c.capture[2] = [0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77]; // Mixer 1 ← Inputs 1-8
+  c.capture[3] = [0x78, 0x79, 0x7a, 0x7b, 0x7c, 0x7d, 48, 49]; // Mixer 2 ← Inputs 9-14, S/PDIF
+  c.links.fill(false);
+  c.links[24] = c.links[25] = c.links[28] = c.links[29] = true; // Mix 1/2, 3/4, 9/10, 11/12
+  return c;
+}
+
 function createSimTransport(): MidiTransport {
-  const cfg = simulatedConfig();
+  let cfg = simulatedConfig();
+  let upload: number[][] = [];
+  /** Flash slots: [standalone, hosted]. */
+  const flash = [defaultsFor("standalone"), structuredClone(cfg)];
   let msgCb: (d: number[]) => void = () => {};
   let open = false;
   const reply = (d: number[]): void => {
@@ -110,6 +133,15 @@ function createSimTransport(): MidiTransport {
       if (!isEs9Sysex(d)) return;
       const cmd = d[5];
       switch (cmd) {
+        case TX.CONFIG_CHUNK: {
+          upload[d[6]] = d.slice(8, -1);
+          if (upload.filter(Boolean).length < CONFIG_CHUNKS) return;
+          const dump = [...HEADER, RX.CONFIG_DUMP, 0, 0, ...upload.flat(), SYSEX_END];
+          upload = [];
+          const parsed = dump.length === CONFIG_DUMP_BYTES ? parseIncoming(dump) : null;
+          if (parsed?.kind === "config") cfg = parsed.config;
+          return reply(encodeConfigDump(cfg)); // the unit answers an upload with a fresh dump
+        }
         case TX.REQ_VERSION:
           return reply(text("ES-9 v1.3.2 (simulated)"));
         case TX.REQ_CONFIG:
@@ -124,29 +156,24 @@ function createSimTransport(): MidiTransport {
         case TX.REQ_SAMPLE_RATE:
           return reply([...HEADER, 0x14, 0, 93, 96, 0xf7]);
         case TX.REQ_SAVE:
+          flash[d[6] & 1] = structuredClone(cfg);
           return reply(text("OK"));
         case TX.REQ_RESTORE:
+          cfg = structuredClone(flash[d[6] & 1]);
+          return reply(encodeConfigDump(cfg));
         case TX.REQ_RESET:
-          return reply(text("OK"));
-        case TX.SET_VMIX: {
-          const idx = d[6];
-          const m = idx >> 3;
-          const ch = idx & 7;
-          // In a stereo-linked pair the odd mix slot carries the pan.
-          const isPan = (m & 1) === 1 && cfg.links[m < 8 ? 24 + (m >> 1) : 28 + ((m - 8) >> 1)];
-          if (isPan) {
-            cfg.vpan[(m - 1) * 8 + ch] = d[7] - 64;
-            return;
-          }
-          cfg.vmix[idx] = d[7];
-          if (m < 16) {
-            cfg.mix[m][ch] = vToRaw(d[7]);
-            reply(build.rawMix(m, ch, cfg.mix[m][ch]));
-          }
-          return;
-        }
+          cfg = defaultsFor(d[6] === 0 ? "standalone" : "hosted");
+          return reply(encodeConfigDump(cfg)); // like the unit
       }
-      if ((cmd & 0xf0) === TX.SET_MIX) cfg.mix[cmd & 0xf][d[6]] = (d[7] << 14) | (d[8] << 7) | d[9];
+      const faderMoved = cmd === TX.SET_VMIX && !vmixSlotIsPan(cfg, d[6]);
+      if (!applySetMessage(cfg, d)) return;
+      if (faderMoved) {
+        // A macro fader moved: derive the raw gain and echo it, as the hardware does.
+        const m = d[6] >> 3;
+        const ch = d[6] & 7;
+        cfg.mix[m][ch] = vToRaw(d[7]);
+        reply(build.rawMix(m, ch, cfg.mix[m][ch]));
+      }
     },
   };
 }

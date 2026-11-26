@@ -11,6 +11,11 @@
 export const HEADER = [0xf0, 0x00, 0x21, 0x27, 0x19] as const;
 export const SYSEX_END = 0xf7;
 export const CONFIG_VERSION = 3;
+/** Words in a firmware 1.3+ config dump, and the size of the whole 0x08 message / .syx file. */
+export const CONFIG_WORDS = 768;
+export const CONFIG_DUMP_BYTES = 8 + 3 * CONFIG_WORDS + 1;
+/** A config upload is split into this many 0x09 chunks (as the official tool does). */
+export const CONFIG_CHUNKS = 24;
 
 export const NUM_DSP = 4;
 export const NUM_CH = 8;
@@ -28,7 +33,10 @@ export const EQ_Q_DEFAULT = 12341; // ≈ 0.707
 
 /** Messages sent by the ES-9. */
 export const RX = {
-  CONFIG_DUMP: 0x10,
+  /** Firmware 1.3+: every field is a 3-byte word. */
+  CONFIG_DUMP: 0x08,
+  /** Firmware 1.2: byte-packed layout. */
+  CONFIG_DUMP_V12: 0x10,
   MIX_DUMP: 0x11,
   USAGE: 0x12,
   SAMPLE_RATE: 0x14,
@@ -37,6 +45,8 @@ export const RX = {
 
 /** Commands understood by the ES-9. */
 export const TX = {
+  /** One of CONFIG_CHUNKS pieces of a 0x08 config dump being uploaded (firmware 1.3+). */
+  CONFIG_CHUNK: 0x09,
   REQ_VERSION: 0x22,
   REQ_CONFIG: 0x23,
   REQ_SAVE: 0x24,
@@ -264,6 +274,9 @@ export function formatRawMix(v: number): string {
   if (v >= RAW_MIX_MAX) return "+12.0";
   return formatDb(rawMixToDb(v));
 }
+/** Stored pan byte (as reported by the mix and config dumps) → UI pan -63..63. */
+export const panFromWire = (b: number) => Math.max(-PAN_RANGE, Math.min(PAN_RANGE, b - 64));
+
 export function formatPan(p: number): string {
   if (p === 0) return "C";
   return p > 0 ? `${p}R` : `${-p}L`;
@@ -367,7 +380,8 @@ export const build = {
   reqSampleRate: () => msg(TX.REQ_SAMPLE_RATE),
   save: (slot: FlashSlot) => msg(TX.REQ_SAVE, slot),
   restore: (slot: FlashSlot) => msg(TX.REQ_RESTORE, slot),
-  reset: () => msg(TX.REQ_RESET),
+  /** Defaults suited to hosted (USB mixer inputs, S/PDIF) or standalone (analogue inputs, Mixer 2) use. */
+  reset: (kind: FlashSlot) => msg(TX.REQ_RESET, kind),
   hpf: (bits: number) => msg(TX.SET_HPF, bits & 0x7f),
   options: (opts: number) => msg(TX.SET_OPTIONS, opts & 0x7f),
   link: (index: number, on: boolean) => msg(TX.SET_LINK, index, on ? 1 : 0),
@@ -378,9 +392,10 @@ export const build = {
   rawMix: (mix: number, ch: number, value: number) => msg(TX.SET_MIX + mix, ch, ...pack14(value)),
   vmix: (mix: number, ch: number, value: number) => msg(TX.SET_VMIX, mix * 8 + ch, value & 0x7f),
   /**
-   * Pan is addressed at (mix+1)*8+ch with a +64 offset, while the mix dump
-   * reports it at mix*8+ch with a -63 offset. The asymmetry is copied verbatim
-   * from the official tool (known to work); do not "fix" it without hardware.
+   * Pan is addressed at (mix+1)*8+ch and sent as 64 + pan. The unit stores and
+   * reports that same byte (centre = 64) in both the mix dump and the config
+   * dump, checked on hardware; see panFromWire. (The official tool reads the
+   * mix dump with a -63 offset, which shows every centred channel as +1.)
    */
   vpan: (mix: number, ch: number, pan: number) => msg(TX.SET_VMIX, ((mix + 1) * 8 + ch) & 0x7f, (64 + pan) & 0x7f),
   dcOffset: (ch: number, value: number) => msg(TX.SET_DC_OFFSET, ch, ...packS16(value)),
@@ -395,6 +410,161 @@ export const build = {
       ...packS16(effectiveEqGain(b.type, b.gain)),
     ),
 };
+
+/** True if a SET_VMIX slot addresses a pan: the odd mix of a stereo-linked pair (see build.vpan). */
+export function vmixSlotIsPan(cfg: Es9Config, slot: number): boolean {
+  const m = slot >> 3;
+  return (m & 1) === 1 && cfg.links[mixLinkIndex(m)];
+}
+
+/**
+ * Applies a "set" message to a config, as the unit does (inverse of `build`).
+ * Used by the simulator and the tests. Returns false for anything else.
+ * A macro fader (SET_VMIX) only updates vmix/vpan here; the raw matrix the
+ * hardware derives from it is left to the caller.
+ */
+export function applySetMessage(cfg: Es9Config, d: ArrayLike<number>): boolean {
+  if (!isEs9Sysex(d)) return false;
+  const cmd = d[5];
+  const hi = cmd & 0xf0;
+  if (hi === TX.SET_INPUTS && (cmd & 0xf) < NUM_DSP) {
+    for (let ch = 0; ch < NUM_CH; ch++) cfg.capture[cmd & 0xf][ch] = captureFromWire(d[6 + ch]);
+    return true;
+  }
+  if (hi === TX.SET_OUTPUTS && (cmd & 0xf) < NUM_DSP) {
+    for (let ch = 0; ch < NUM_CH; ch++) cfg.outputs[cmd & 0xf][ch] = d[6 + ch];
+    return true;
+  }
+  if (hi === TX.SET_MIX) {
+    cfg.mix[cmd & 0xf][d[6]] = unpack21(d, 7);
+    return true;
+  }
+  switch (cmd) {
+    case TX.SET_HPF:
+      cfg.hpf = d[6];
+      return true;
+    case TX.SET_OPTIONS:
+      cfg.options = d[6];
+      return true;
+    case TX.SET_LINK:
+      cfg.links[d[6]] = d[7] === 1;
+      return true;
+    case TX.SET_SMOOTHING:
+      cfg.smoothing[d[6]] = d[7] === 1;
+      return true;
+    case TX.SET_MIDI_CHANNELS:
+      cfg.midiChUsb = d[6];
+      cfg.midiChDin = d[7];
+      return true;
+    case TX.SET_DC_OFFSET:
+      cfg.dcOffset[d[6]] = signExtend16(unpack21(d, 7));
+      return true;
+    case TX.SET_FILTER: {
+      const type = d[8];
+      cfg.eq[d[6] >> 3][d[6] & 7][d[7]] = {
+        enabled: (type & 1) === 1,
+        type: type >> 1,
+        freq: unpack21(d, 9),
+        q: unpack21(d, 12),
+        gain: signExtend16(unpack21(d, 15)),
+      };
+      return true;
+    }
+    case TX.SET_VMIX: {
+      if (vmixSlotIsPan(cfg, d[6])) cfg.vpan[d[6] - 8] = panFromWire(d[7]);
+      else cfg.vmix[d[6]] = d[7];
+      return true;
+    }
+  }
+  return false;
+}
+
+export interface KeyedMessage {
+  /** Coalescing key, the same the store uses for the equivalent live edit. */
+  key: string;
+  data: number[];
+  text: string;
+}
+
+const sameBand = (a: EqBand, b: EqBand) => a.enabled === b.enabled && a.type === b.type && a.freq === b.freq && a.q === b.q && a.gain === b.gain;
+
+/**
+ * The set messages that turn the unit's state `from` into `to` (used by undo/redo).
+ * Options and links go first because they change how later messages are read.
+ * Macro faders/pans come before the raw matrix: the unit derives raw gains from
+ * them, so a raw gain is only sent where its fader and pan did not change.
+ */
+export function diffMessages(from: Es9Config, to: Es9Config): KeyedMessage[] {
+  const out: KeyedMessage[] = [];
+  const add = (key: string, data: number[], text: string) => out.push({ key, data, text });
+  if (from.options !== to.options) add("opts", build.options(to.options), "options");
+  to.links.forEach((on, i) => on !== from.links[i] && add(`link${i}`, build.link(i, on), `stereo link ${i} ${on ? "on" : "off"}`));
+  if (from.hpf !== to.hpf) add("hpf", build.hpf(to.hpf), "DC blocking");
+  if (from.midiChUsb !== to.midiChUsb || from.midiChDin !== to.midiChDin)
+    add("midich", build.midiChannels(to.midiChUsb, to.midiChDin), "mixer MIDI channels");
+  for (let dsp = 0; dsp < NUM_DSP; dsp++) {
+    if (to.capture[dsp].some((v, ch) => v !== from.capture[dsp][ch])) add(`in${dsp}`, build.inputs(dsp, [...to.capture[dsp]]), `inputs DSP ${dsp}`);
+    if (to.outputs[dsp].some((v, ch) => v !== from.outputs[dsp][ch])) add(`out${dsp}`, build.outputs(dsp, [...to.outputs[dsp]]), `outputs DSP ${dsp}`);
+  }
+  to.smoothing.forEach((on, m) => on !== from.smoothing[m] && add(`sm${m}`, build.smoothing(m, on), `smoothing mix ${m + 1}`));
+  to.dcOffset.forEach((v, ch) => v !== from.dcOffset[ch] && add(`dc${ch}`, build.dcOffset(ch, v), "output DC offset"));
+  for (let mixer = 0; mixer < 2; mixer++)
+    for (let ch = 0; ch < NUM_CH; ch++)
+      for (let band = 0; band < NUM_FILTERS; band++) {
+        const b = to.eq[mixer][ch][band];
+        if (!sameBand(b, from.eq[mixer][ch][band])) add(`eq${mixer}_${ch}_${band}`, build.filter(mixer, ch, band, { ...b }), "EQ update");
+      }
+  const macroChanged = new Set<number>();
+  for (let m = 0; m < NUM_MIX; m++)
+    for (let ch = 0; ch < NUM_CH; ch++) {
+      const i = m * 8 + ch;
+      if (to.vmix[i] !== from.vmix[i]) {
+        add(`vmix${m}_${ch}`, build.vmix(m, ch, to.vmix[i]), "macro mix level");
+        macroChanged.add(i);
+      }
+      // A pan only exists on the even mix of a stereo-linked pair.
+      if ((m & 1) === 0 && to.links[mixLinkIndex(m)] && to.vpan[i] !== from.vpan[i]) {
+        add(`vpan${m}_${ch}`, build.vpan(m, ch, to.vpan[i]), "macro mix pan");
+        macroChanged.add(i).add(i + 8);
+      }
+    }
+  for (let m = 0; m < NUM_MIX; m++)
+    for (let ch = 0; ch < NUM_CH; ch++)
+      if (!macroChanged.has(m * 8 + ch) && to.mix[m][ch] !== from.mix[m][ch]) add(`raw${m}_${ch}`, build.rawMix(m, ch, to.mix[m][ch]), "raw mix");
+  return out;
+}
+
+// ───────────────────────────── Config files (.syx) ─────────────────────────────
+
+/**
+ * A .syx config file is the raw 0x08 dump as sent by the unit (the same format
+ * the official config tool saves). Returns the parsed config, or an error.
+ */
+export function checkConfigFile(bytes: ArrayLike<number>): { ok: true; config: Es9Config } | { ok: false; error: string } {
+  const a = Array.from(bytes);
+  const headerOk = HEADER.every((b, i) => a[i] === b);
+  if (a.length !== CONFIG_DUMP_BYTES || !headerOk || a[5] !== RX.CONFIG_DUMP || a[a.length - 1] !== SYSEX_END)
+    return { ok: false, error: "Not an ES-9 config dump (firmware 1.3+ .syx, 2313 bytes)" };
+  if (a.slice(1, -1).some((b) => b > 0x7f)) return { ok: false, error: "Corrupt config dump (invalid SysEx data)" };
+  const parsed = parseIncoming(a);
+  if (parsed?.kind === "configVersionMismatch") return { ok: false, error: `Config dump version ${parsed.version} is not supported (expected ${CONFIG_VERSION})` };
+  if (parsed?.kind !== "config") return { ok: false, error: "Corrupt config dump" };
+  return { ok: true, config: parsed.config };
+}
+
+/** Splits a 0x08 config dump into the 0x09 messages that upload it to the unit. */
+export function configUploadChunks(dump: ArrayLike<number>): number[][] {
+  const a = Array.from(dump);
+  const perChunk = (3 * CONFIG_WORDS) / CONFIG_CHUNKS;
+  return Array.from({ length: CONFIG_CHUNKS }, (_, i) => [
+    ...HEADER,
+    TX.CONFIG_CHUNK,
+    i,
+    0,
+    ...a.slice(8 + i * perChunk, 8 + (i + 1) * perChunk),
+    SYSEX_END,
+  ]);
+}
 
 // ───────────────────────────── Parsers ─────────────────────────────
 
@@ -427,7 +597,52 @@ function parseMixMatrix(d: ArrayLike<number>, c: number): [number[][], number] {
   return [mix, c];
 }
 
-/** Parses the payload of a config dump (after the 8-byte prefix). */
+/**
+ * Parses the payload of a firmware 1.3+ config dump (`0x08`, after the 8-byte
+ * prefix). Every field is a 21-bit word sent as 3 bytes. Layout as in Expert
+ * Sleepers' es9_config_tool_1.3.html, plus vmix/vpan (which that tool skips).
+ */
+export function parseConfigWords(d: ArrayLike<number>): Incoming {
+  const w: number[] = [];
+  for (let i = 0; i + 2 < d.length; i += 3) w.push(unpack21(d, i));
+  if (w[0] !== CONFIG_VERSION) return { kind: "configVersionMismatch", version: w[0] };
+  const cfg = defaultConfig();
+  cfg.hpf = w[1];
+  for (let dsp = 0; dsp < NUM_DSP; dsp++)
+    for (let ch = 0; ch < NUM_CH; ch++) {
+      cfg.capture[dsp][ch] = captureFromWire(w[2 + dsp * 8 + ch]);
+      cfg.outputs[dsp][ch] = w[2 + 32 + dsp * 8 + ch];
+    }
+  let c = 2 + 32 + 32;
+  for (let m = 0; m < NUM_MIX; m++) for (let ch = 0; ch < NUM_CH; ch++) cfg.mix[m][ch] = w[c++];
+  for (let i = 0; i < 128; i++) cfg.vmix[i] = w[c++];
+  for (let i = 0; i < 128; i++) cfg.vpan[i] = panFromWire(w[c++]);
+  cfg.options = w[c++];
+  const links0 = w[c++];
+  const links1 = w[c++];
+  for (let i = 0; i < 16; i++) {
+    cfg.links[i] = ((links0 >> i) & 1) === 1;
+    cfg.links[16 + i] = ((links1 >> i) & 1) === 1;
+  }
+  const channels = w[c++];
+  cfg.midiChUsb = (channels >> 8) & 0xff;
+  cfg.midiChDin = channels & 0xff;
+  for (let i = 0; i < 8; i++) cfg.dcOffset[i] = signExtend16(w[c++]);
+  for (let m = 0; m < 2; m++)
+    for (let ch = 0; ch < NUM_CH; ch++)
+      for (let f = 0; f < NUM_FILTERS; f++) {
+        const type = w[c++];
+        const freq = w[c++];
+        const q = w[c++];
+        const gain = signExtend16(w[c++]);
+        cfg.eq[m][ch][f] = { enabled: (type & 1) === 1, type: type >> 1, freq, q, gain };
+      }
+  const smoothing = w[c++];
+  for (let i = 0; i < 16; i++) cfg.smoothing[i] = ((smoothing >> i) & 1) === 1;
+  return { kind: "config", config: cfg };
+}
+
+/** Parses the payload of a firmware 1.2 config dump (`0x10`, after the 8-byte prefix). */
 export function parseConfigPayload(d: ArrayLike<number>): Incoming {
   const version = d[0];
   if (version !== CONFIG_VERSION) return { kind: "configVersionMismatch", version };
@@ -487,6 +702,8 @@ export function parseIncoming(data: ArrayLike<number>): Incoming | null {
       return { kind: "message", text: String.fromCharCode(...bytes).trim() };
     }
     case RX.CONFIG_DUMP:
+      return parseConfigWords(arr.slice(8, -1));
+    case RX.CONFIG_DUMP_V12:
       return parseConfigPayload(arr.slice(8, -1));
     case RX.MIX_DUMP: {
       const [mix, c0] = parseMixMatrix(body, 0);
@@ -495,7 +712,7 @@ export function parseIncoming(data: ArrayLike<number>): Incoming | null {
       let c = c0;
       for (let i = 0; i < 128; i++) {
         vmix.push(body[c++] ?? 0);
-        vpan.push((body[c++] ?? 63) - 63);
+        vpan.push(panFromWire(body[c++] ?? 64));
       }
       return { kind: "mix", mix, vmix, vpan };
     }
@@ -515,8 +732,32 @@ export function parseIncoming(data: ArrayLike<number>): Incoming | null {
 
 // ───────────────────────────── Encoders (for tests / simulation) ─────────────────────────────
 
-/** Serialises a config into a full `0x10` dump message (inverse of the parser). */
+/** Serialises a config into a full firmware 1.3+ `0x08` dump (inverse of parseConfigWords). */
 export function encodeConfigDump(cfg: Es9Config): number[] {
+  const w: number[] = [CONFIG_VERSION, cfg.hpf];
+  for (let dsp = 0; dsp < NUM_DSP; dsp++) for (const v of cfg.capture[dsp]) w.push(captureToWire(v));
+  for (let dsp = 0; dsp < NUM_DSP; dsp++) for (const v of cfg.outputs[dsp]) w.push(v);
+  for (const row of cfg.mix) w.push(...row);
+  w.push(...cfg.vmix, ...cfg.vpan.map((p) => p + 64));
+  let l0 = 0;
+  let l1 = 0;
+  for (let i = 0; i < 16; i++) {
+    if (cfg.links[i]) l0 |= 1 << i;
+    if (cfg.links[16 + i]) l1 |= 1 << i;
+  }
+  w.push(cfg.options, l0, l1, (cfg.midiChUsb << 8) | cfg.midiChDin);
+  for (const v of cfg.dcOffset) w.push(v & 0xffff);
+  for (const mixer of cfg.eq)
+    for (const ch of mixer) for (const b of ch) w.push((b.type << 1) | (b.enabled ? 1 : 0), b.freq, b.q, b.gain & 0xffff);
+  let sm = 0;
+  cfg.smoothing.forEach((on, i) => on && (sm |= 1 << i));
+  w.push(sm);
+  while (w.length < CONFIG_WORDS) w.push(0); // the unit pads the dump to 768 words
+  return [...HEADER, RX.CONFIG_DUMP, 0, 0, ...w.flatMap(pack14), SYSEX_END];
+}
+
+/** Serialises a config into a full firmware 1.2 `0x10` dump (inverse of parseConfigPayload). */
+export function encodeConfigDumpV12(cfg: Es9Config): number[] {
   const d: number[] = [CONFIG_VERSION, cfg.hpf & 0x7f];
   for (let dsp = 0; dsp < NUM_DSP; dsp++) for (const v of cfg.capture[dsp]) d.push(captureToWire(v));
   for (let dsp = 0; dsp < NUM_DSP; dsp++) for (const v of cfg.outputs[dsp]) d.push(v);
@@ -538,13 +779,13 @@ export function encodeConfigDump(cfg: Es9Config): number[] {
   let sm = 0;
   cfg.smoothing.forEach((on, i) => on && (sm |= 1 << i));
   d.push(...pack14(sm));
-  return [...HEADER, RX.CONFIG_DUMP, 0, 0, ...d, SYSEX_END];
+  return [...HEADER, RX.CONFIG_DUMP_V12, 0, 0, ...d, SYSEX_END];
 }
 
 export function encodeMixDump(mix: number[][], vmix: number[], vpan: number[]): number[] {
   const d: number[] = [];
   for (const row of mix) for (const v of row) d.push(...pack14(v));
-  for (let i = 0; i < 128; i++) d.push(vmix[i] & 0x7f, (vpan[i] + 63) & 0x7f);
+  for (let i = 0; i < 128; i++) d.push(vmix[i] & 0x7f, (vpan[i] + 64) & 0x7f);
   return [...HEADER, RX.MIX_DUMP, ...d, SYSEX_END];
 }
 

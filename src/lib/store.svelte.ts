@@ -3,11 +3,15 @@
  * optimistically and sends the matching SysEx to the ES-9; incoming SysEx
  * replaces local state with the device's truth.
  */
+import { confirmAction, openBytes, presets, saveBytes, type PresetInfo } from "./files";
 import { createTransport, type MidiTransport, type PortList } from "./midi";
 import {
   build,
   captureLabel,
   captureLinkIndex,
+  checkConfigFile,
+  configUploadChunks,
+  diffMessages,
   defaultConfig,
   FlashSlot,
   mixLinkIndex,
@@ -15,6 +19,7 @@ import {
   OPT_MIXER2,
   outputLabel,
   parseIncoming,
+  RX,
   toHex,
   type EqBand,
   type Es9Config,
@@ -36,6 +41,11 @@ export interface Toast {
 }
 
 const LOG_LIMIT = 400;
+const UNDO_LIMIT = 200;
+/** Edits of the same control closer together than this are one undo step (e.g. a fader drag). */
+const UNDO_MERGE_MS = 800;
+/** Minimum gap between automatic re-syncs when the window regains focus. */
+const AUTO_SYNC_MS = 2000;
 const POLL_MS = 4000;
 const FLUSH_MS = 16;
 const STORAGE_KEY = "es9.ports";
@@ -69,11 +79,32 @@ class Es9Store {
   lastTx = $state<string>("");
   lastRx = $state<string>("");
 
+  /** True once the unit's state differs from what was last saved to / loaded from flash in this session. */
+  unsaved = $state(false);
+  presetList = $state<PresetInfo[]>([]);
+  canUndo = $state(false);
+  canRedo = $state(false);
+  private undoStack: Es9Config[] = [];
+  private redoStack: Es9Config[] = [];
+  private lastEdit = { key: "", t: 0 };
+  private pendingSave = false;
+  /**
+   * Edit counter, and its value when the last config / mix dump was requested.
+   * A dump requested before a later edit describes the state before that edit:
+   * applying it would undo the edit on screen, so it is re-requested instead.
+   */
+  private editSeq = 0;
+  private configReqSeq = 0;
+  private mixReqSeq = 0;
+  private lastAutoSync = 0;
+
   private transport: MidiTransport | null = null;
   private pending = new Map<string, { data: number[]; text: string; quiet: boolean }>();
   private flushScheduled = false;
   private awaitingVersion = false;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** Callbacks waiting for the next config dump (raw bytes). */
+  private dumpWaiters: ((raw: number[]) => void)[] = [];
 
   // ───────────── derived helpers ─────────────
 
@@ -124,6 +155,7 @@ class Es9Store {
     this.transport = await createTransport();
     this.simulated = this.transport.simulated;
     this.transport.onMessage((d) => this.handleIncoming(d));
+    void this.refreshPresets();
     this.transport.onPortsChanged((p) => this.handlePorts(p));
     try {
       this.handlePorts(await this.transport.listPorts());
@@ -172,6 +204,8 @@ class Es9Store {
       this.inputName = input;
       this.outputName = output;
       this.connected = true;
+      this.clearHistory();
+      this.unsaved = false;
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ input, output }));
       this.info(`Connected: in "${input}", out "${output}"`);
       this.requestVersion();
@@ -293,8 +327,14 @@ class Es9Store {
     }
     switch (msg.kind) {
       case "config":
+        if (this.configReqSeq !== this.editSeq) {
+          this.addLog("rx", "config dump (outdated by a newer edit: reading again)", this.lastRx);
+          this.requestConfig();
+          break;
+        }
         this.cfg = msg.config;
         this.haveConfig = true;
+        for (const w of this.dumpWaiters.splice(0)) w(data);
         this.addLog("rx", `config dump (${data.length} bytes)`, this.lastRx);
         this.requestMix();
         break;
@@ -303,6 +343,11 @@ class Es9Store {
         this.toast("error", "This tool does not match the ES-9 firmware (needs v1.2.0+).", 6000);
         break;
       case "mix":
+        if (this.mixReqSeq !== this.editSeq) {
+          this.addLog("rx", "mix dump (outdated by a newer edit: reading again)", this.lastRx);
+          this.requestMix();
+          break;
+        }
         this.cfg.mix = msg.mix;
         this.cfg.vmix = msg.vmix;
         this.cfg.vpan = msg.vpan;
@@ -324,6 +369,8 @@ class Es9Store {
           this.awaitingVersion = false;
           this.version = msg.text;
         } else {
+          if (this.pendingSave && msg.text.toUpperCase() === "OK") this.unsaved = false;
+          this.pendingSave = false;
           this.toast(msg.text.toUpperCase() === "OK" ? "success" : "info", `ES-9: ${msg.text}`);
         }
         break;
@@ -341,29 +388,218 @@ class Es9Store {
     setTimeout(() => (this.awaitingVersion = false), 1500);
   }
   requestConfig() {
+    this.configReqSeq = this.editSeq;
     this.send("cfg", build.reqConfig(), "config request");
   }
   requestMix() {
+    this.mixReqSeq = this.editSeq;
     this.send("mixreq", build.reqMix(), "mix request");
   }
   requestUsageSoon() {
     setTimeout(() => this.send("usage", build.reqUsage(), "usage request", true), 100);
   }
+  /** Re-reads the config when the window regains focus: the unit never reports changes made elsewhere. */
+  autoSync() {
+    if (!this.connected || performance.now() - this.lastAutoSync < AUTO_SYNC_MS) return;
+    this.lastAutoSync = performance.now();
+    this.requestConfig();
+  }
   saveToFlash(slot: FlashSlot) {
+    this.pendingSave = true;
     this.sendOnce(build.save(slot), `save to flash (${slot === FlashSlot.Hosted ? "hosted" : "standalone"})`);
   }
   restoreFromFlash(slot: FlashSlot) {
+    this.record("bulk");
+    this.unsaved = false;
     this.sendOnce(build.restore(slot), `load from flash (${slot === FlashSlot.Hosted ? "hosted" : "standalone"})`);
     setTimeout(() => this.requestConfig(), 250);
   }
-  resetToDefaults() {
-    this.sendOnce(build.reset(), "reset to defaults");
+  // ───────────── config files (.syx) ─────────────
+
+  /** Requests a fresh config dump and resolves with its raw bytes. */
+  private fetchConfigDump(timeoutMs = 3000): Promise<number[]> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.dumpWaiters = this.dumpWaiters.filter((w) => w !== waiter);
+        reject(new Error("the ES-9 did not answer"));
+      }, timeoutMs);
+      const waiter = (raw: number[]) => {
+        clearTimeout(timer);
+        resolve(raw);
+      };
+      this.dumpWaiters.push(waiter);
+      this.requestConfig();
+    });
+  }
+
+  /** Saves the unit's current configuration to a .syx file (raw 0x08 dump, like the official tool). */
+  async exportConfigFile() {
+    if (!this.connected) return;
+    try {
+      const raw = await this.fetchConfigDump();
+      if (raw[5] !== RX.CONFIG_DUMP) throw new Error("saving to a file needs ES-9 firmware 1.3 or later");
+      const name = await saveBytes(`es9-config-${new Date().toISOString().slice(0, 10)}.syx`, raw);
+      if (!name) return;
+      this.info(`Config saved to ${name}`);
+      this.toast("success", `Config saved to ${name}`);
+    } catch (e) {
+      this.error(`Save config failed: ${e instanceof Error ? e.message : e}`);
+      this.toast("error", `Save config failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  /** Loads a .syx config file into the unit (not into flash). */
+  async importConfigFile() {
+    if (!this.connected) return;
+    try {
+      const file = await openBytes();
+      if (!file) return;
+      const check = checkConfigFile(file.bytes);
+      if (!check.ok) throw new Error(`${file.name}: ${check.error}`);
+      const ok = await confirmAction(
+        "Load config file",
+        `Send "${file.name}" to the ES-9? It replaces the current settings. Flash memory is not changed until you save to flash.`,
+        "Load",
+      );
+      if (!ok) return;
+      this.record("bulk");
+      for (const chunk of configUploadChunks(file.bytes)) this.sendOnce(chunk, `config upload: ${file.name}`);
+      setTimeout(() => this.requestConfig(), 400);
+      this.toast("success", `Loaded ${file.name}`);
+    } catch (e) {
+      this.error(`Load config failed: ${e instanceof Error ? e.message : e}`);
+      this.toast("error", `Load config failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  // ───────────── presets ─────────────
+
+  async refreshPresets() {
+    try {
+      this.presetList = await presets.list();
+    } catch (e) {
+      this.error(`Cannot list presets: ${e}`);
+    }
+  }
+
+  /** Stores the unit's current configuration as a named preset. */
+  async savePreset(name: string) {
+    name = name.trim();
+    if (!this.connected || !name) return false;
+    try {
+      if (this.presetList.some((p) => p.name === name)) {
+        const ok = await confirmAction("Overwrite preset", `Replace the preset "${name}" with the current configuration?`, "Replace");
+        if (!ok) return false;
+      }
+      const raw = await this.fetchConfigDump();
+      if (raw[5] !== RX.CONFIG_DUMP) throw new Error("presets need ES-9 firmware 1.3 or later");
+      await presets.write(name, raw);
+      await this.refreshPresets();
+      this.info(`Preset "${name}" saved`);
+      this.toast("success", `Preset "${name}" saved`);
+      return true;
+    } catch (e) {
+      this.error(`Save preset failed: ${e instanceof Error ? e.message : e}`);
+      this.toast("error", `Save preset failed: ${e instanceof Error ? e.message : e}`);
+      return false;
+    }
+  }
+
+  /** Sends a preset to the unit (undoable; flash is not changed). */
+  async loadPreset(name: string) {
+    if (!this.connected) return;
+    try {
+      const bytes = await presets.read(name);
+      const check = checkConfigFile(bytes);
+      if (!check.ok) throw new Error(check.error);
+      this.record("bulk");
+      for (const chunk of configUploadChunks(bytes)) this.sendOnce(chunk, `load preset: ${name}`);
+      setTimeout(() => this.requestConfig(), 400);
+      this.toast("success", `Preset "${name}" loaded`);
+    } catch (e) {
+      this.error(`Load preset failed: ${e instanceof Error ? e.message : e}`);
+      this.toast("error", `Load preset failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  async deletePreset(name: string) {
+    try {
+      const ok = await confirmAction("Delete preset", `Delete the preset "${name}"? This cannot be undone.`, "Delete");
+      if (!ok) return;
+      await presets.remove(name);
+      await this.refreshPresets();
+      this.toast("info", `Preset "${name}" deleted`);
+    } catch (e) {
+      this.error(`Delete preset failed: ${e instanceof Error ? e.message : e}`);
+      this.toast("error", `Delete preset failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  revealPresets() {
+    presets.reveal().catch((e) => this.toast("error", `Cannot open the presets folder: ${e}`));
+  }
+
+  resetToDefaults(kind: FlashSlot) {
+    this.record("bulk");
+    this.sendOnce(build.reset(kind), `reset to ${kind === FlashSlot.Hosted ? "hosted" : "standalone"} defaults`);
     setTimeout(() => this.requestConfig(), 250);
+  }
+
+  // ───────────── undo / redo ─────────────
+
+  /**
+   * Call before every edit. Saves the current state as an undo step, unless the
+   * same control was edited a moment ago (one drag = one step). "bulk" edits
+   * (reset, load, upload) always make their own step.
+   */
+  private record(key: string) {
+    const now = performance.now();
+    this.editSeq++;
+    this.unsaved = true;
+    const merge = key !== "bulk" && key === this.lastEdit.key && now - this.lastEdit.t < UNDO_MERGE_MS;
+    this.lastEdit = { key, t: now };
+    if (merge) return;
+    this.undoStack.push($state.snapshot(this.cfg));
+    if (this.undoStack.length > UNDO_LIMIT) this.undoStack.shift();
+    this.redoStack = [];
+    this.syncHistoryFlags();
+  }
+  private clearHistory() {
+    this.undoStack = [];
+    this.redoStack = [];
+    this.lastEdit = { key: "", t: 0 };
+    this.syncHistoryFlags();
+  }
+  private syncHistoryFlags() {
+    this.canUndo = this.undoStack.length > 0;
+    this.canRedo = this.redoStack.length > 0;
+  }
+  undo() {
+    this.stepHistory(this.undoStack, this.redoStack, "undo");
+  }
+  redo() {
+    this.stepHistory(this.redoStack, this.undoStack, "redo");
+  }
+  private stepHistory(from: Es9Config[], to: Es9Config[], what: string) {
+    const target = from.pop();
+    if (!target || !this.connected) return;
+    to.push($state.snapshot(this.cfg));
+    this.editSeq++;
+    this.lastEdit = { key: "", t: 0 };
+    this.syncHistoryFlags();
+    const msgs = diffMessages($state.snapshot(this.cfg), target);
+    for (const m of msgs) this.send(m.key, m.data, `${what}: ${m.text}`);
+    this.cfg = target;
+    this.unsaved = true;
+    // The unit derives the raw matrix from the macro faders: read back the truth.
+    this.requestMix();
+    this.requestUsageSoon();
   }
 
   // ───────────── routing ─────────────
 
   setCapture(dsp: number, ch: number, v: number) {
+    this.record(`in${dsp}_${ch}`);
     const cap = this.cfg.capture[dsp];
     cap[ch] = v;
     if (this.isCaptureLinked(v)) {
@@ -375,11 +611,13 @@ class Es9Store {
   }
 
   setOutput(dsp: number, ch: number, v: number) {
+    this.record(`out${dsp}_${ch}`);
     this.cfg.outputs[dsp][ch] = v;
     this.send(`out${dsp}`, build.outputs(dsp, [...this.cfg.outputs[dsp]]), `outputs DSP ${dsp}`);
   }
 
   setLink(index: number, on: boolean) {
+    this.record(`link${index}`);
     this.cfg.links[index] = on;
     this.send(`link${index}`, build.link(index, on), `stereo link ${index} ${on ? "on" : "off"}`);
     this.requestMix();
@@ -388,18 +626,22 @@ class Es9Store {
   // ───────────── mixer ─────────────
 
   setRawMix(m: number, ch: number, v: number) {
+    this.record(`raw${m}_${ch}`);
     this.cfg.mix[m][ch] = v;
     this.send(`raw${m}_${ch}`, build.rawMix(m, ch, v), "raw mix");
   }
   setVmix(m: number, ch: number, v: number) {
+    this.record(`vmix${m}_${ch}`);
     this.cfg.vmix[m * 8 + ch] = v;
     this.send(`vmix${m}_${ch}`, build.vmix(m, ch, v), "macro mix level");
   }
   setVpan(m: number, ch: number, p: number) {
+    this.record(`vpan${m}_${ch}`);
     this.cfg.vpan[m * 8 + ch] = p;
     this.send(`vpan${m}_${ch}`, build.vpan(m, ch, p), "macro mix pan");
   }
   setSmoothing(m: number, on: boolean) {
+    this.record(`sm${m}`);
     this.cfg.smoothing[m] = on;
     this.send(`sm${m}`, build.smoothing(m, on), `smoothing mix ${m + 1} ${on ? "on" : "off"}`);
     this.requestUsageSoon();
@@ -408,6 +650,7 @@ class Es9Store {
   // ───────────── EQ ─────────────
 
   setEq(mixer: number, ch: number, band: number, patch: Partial<EqBand>) {
+    this.record(`eq${mixer}_${ch}_${band}`);
     const b = this.cfg.eq[mixer][ch][band];
     Object.assign(b, patch);
     this.send(`eq${mixer}_${ch}_${band}`, build.filter(mixer, ch, band, { ...b }), "EQ update");
@@ -417,10 +660,12 @@ class Es9Store {
   // ───────────── settings ─────────────
 
   setHpfBit(bit: number, on: boolean) {
+    this.record(`hpf${bit}`);
     this.cfg.hpf = on ? this.cfg.hpf | (1 << bit) : this.cfg.hpf & ~(1 << bit);
     this.send("hpf", build.hpf(this.cfg.hpf), "DC blocking");
   }
   private setOptions(opts: number) {
+    this.record("opts");
     this.cfg.options = opts;
     this.send("opts", build.options(opts), "options");
     this.requestMix();
@@ -432,11 +677,13 @@ class Es9Store {
     this.setOptions(on ? this.cfg.options | OPT_MIDI_THRU : this.cfg.options & ~OPT_MIDI_THRU);
   }
   setMidiChannels(usb: number, din: number) {
+    this.record("midich");
     this.cfg.midiChUsb = usb;
     this.cfg.midiChDin = din;
     this.send("midich", build.midiChannels(usb, din), "mixer MIDI channels");
   }
   setDcOffset(ch: number, v: number) {
+    this.record(`dc${ch}`);
     this.cfg.dcOffset[ch] = v;
     this.send(`dc${ch}`, build.dcOffset(ch, v), "output DC offset");
   }
@@ -444,3 +691,6 @@ class Es9Store {
 
 export const es9 = new Es9Store();
 export { FlashSlot };
+
+// Dev builds only: expose the store for debugging and UI tests from the console.
+if (import.meta.env.DEV) (window as unknown as { es9: Es9Store }).es9 = es9;
